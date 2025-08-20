@@ -1,7 +1,7 @@
 
 // Minimal utility
-const imageExt = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic']; // keep HEIC
-const videoExt = ['.mp4', '.mov', '.webm', '.mkv', '.avi'];
+const imageExt = ['.jpg', '.jpeg', '.png',];
+const videoExt = ['.mp4', '.mov',];
 const isImage = (name) => imageExt.some(e => name.toLowerCase().endsWith(e));
 const isVideo = (name) => videoExt.some(e => name.toLowerCase().endsWith(e));
 
