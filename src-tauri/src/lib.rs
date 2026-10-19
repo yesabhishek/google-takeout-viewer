@@ -4,6 +4,8 @@ mod devserver;
 mod export;
 #[cfg(target_os = "macos")]
 mod mac;
+#[cfg(target_os = "windows")]
+mod win;
 mod meta;
 mod protocol;
 mod scan;

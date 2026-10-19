@@ -3745,6 +3745,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tiny_http",
  "walkdir",
+ "windows",
  "xxhash-rust",
 ]
 

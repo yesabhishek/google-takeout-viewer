@@ -11,6 +11,8 @@ pub struct VideoInfo {
     pub height: u32,
     pub duration_ms: u32,
     pub creation_ts: Option<i64>,
+    /// Clockwise rotation (0/90/180/270) the player applies to the stored frames.
+    pub rotation: u16,
 }
 
 const MAC_EPOCH_OFFSET: i64 = 2_082_844_800; // 1904-01-01 -> 1970-01-01
@@ -134,11 +136,18 @@ fn probe_moov(moov: &[u8]) -> Option<VideoInfo> {
         if w == 0 || h == 0 {
             continue;
         }
+        let rotation = match (a.signum(), b.signum()) {
+            (0, 1) => 90,
+            (0, -1) => 270,
+            (-1, 0) => 180,
+            _ => 0,
+        };
         let rotated = a == 0 && b != 0; // 90 or 270 degrees
         let (w, h) = if rotated { (h, w) } else { (w, h) };
         if w * h > info.width * info.height {
             info.width = w;
             info.height = h;
+            info.rotation = rotation;
         }
     }
     if info.width == 0 && info.duration_ms == 0 {
@@ -180,6 +189,7 @@ mod tests {
         moov.extend(bx(b"trak", &trak_body));
         let info = probe_moov(&moov).unwrap();
         assert_eq!((info.width, info.height), (1080, 1920));
+        assert_eq!(info.rotation, 90);
         assert_eq!(info.duration_ms, 3000);
         assert_eq!(info.creation_ts, Some(1_600_000_000));
     }

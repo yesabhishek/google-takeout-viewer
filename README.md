@@ -24,7 +24,7 @@ Built with a Rust core ([Tauri 2](https://tauri.app)) and a small Svelte UI. The
 Get the latest build from [Releases](https://github.com/yesabhishek/google-takeout-viewer/releases):
 
 - **macOS 13+** (Apple Silicon and Intel): the `universal.dmg`.
-- **Windows 10/11** (preview): the `x64-setup.exe`. It installs for the current user and needs no admin rights.
+- **Windows 10/11** (preview): the `x64-setup.exe`. It installs for the current user and needs no admin rights. For iPhone photos, install Microsoft's free [HEIF Image Extensions](https://apps.microsoft.com/detail/9pmmsr1cgpwg) from the Microsoft Store; without it, HEIC files don't preview. iPhone videos (HEVC) also need the [HEVC Video Extensions](https://apps.microsoft.com/detail/9nmzlz57r3t7).
 
 The builds aren't code-signed yet, so the first launch shows a warning:
 
@@ -63,6 +63,7 @@ src-tauri/src/
   meta.rs      fingerprint, size, EXIF (date/GPS/camera), motion-photo detection
   video.rs     minimal MP4/MOV box parser: size, rotation, duration, creation time
   mac.rs       ImageIO (HEIC/RAW/JPEG thumbnails, conversion) + AVFoundation (video frames)
+  win.rs       Windows: WIC (HEIC/AVIF/RAW/JPEG decoding via the OS codecs) + Media Foundation (video frames)
   thumbs.rs    thumbnail cache: visible tiles first (LIFO), then background pre-generation
   protocol.rs  gp:// media protocol: thumbnails, originals with byte ranges, Live clips
   export.rs    copy / convert / resize, Live clips, file dates
@@ -121,7 +122,7 @@ To build without releasing (for example, to try the Windows build), run the **Re
 
 ## Notes
 
-- macOS is the main platform. Windows builds use a portable fallback (the `image` crate and `ffmpeg` instead of ImageIO/AVFoundation) that has had very little testing, and HEIC decoding isn't supported there yet.
+- macOS is the main platform. Windows builds decode images with WIC and video frames with Media Foundation, falling back to the `image` crate and `ffmpeg`. This has had very little testing. HEIC/HEIF works on Windows when the HEIF Image Extensions are installed, and AVIF needs the AV1 Video Extension. Export can convert to JPEG, PNG, TIFF or WebP there. Linux uses the portable fallback only.
 - The original single-file browser viewer lives in [`legacy-web/`](legacy-web/).
 
 ## License

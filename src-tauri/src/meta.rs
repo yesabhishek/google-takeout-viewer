@@ -90,10 +90,22 @@ pub fn extract(path: &Path, kind: i64, ext: &str, size: u64) -> FileMeta {
             m.height = h;
             orientation = o;
         }
+        #[cfg(target_os = "windows")]
+        let native = crate::win::image_props(path).map(|(w, h, o)| {
+            m.width = w;
+            m.height = h;
+            if let Some(o) = o {
+                orientation = o;
+            }
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let native: Option<()> = None;
         #[cfg(not(target_os = "macos"))]
-        if let Ok(sz) = imagesize::size(path) {
-            m.width = sz.width as u32;
-            m.height = sz.height as u32;
+        if native.is_none() {
+            if let Ok(sz) = imagesize::size(path) {
+                m.width = sz.width as u32;
+                m.height = sz.height as u32;
+            }
         }
     }
     if (5..=8).contains(&orientation) {

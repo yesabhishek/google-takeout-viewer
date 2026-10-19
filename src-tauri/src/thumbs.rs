@@ -279,6 +279,10 @@ pub fn image_thumb(path: &Path, max_px: u32) -> Option<Vec<u8>> {
     }
     #[cfg(not(target_os = "macos"))]
     {
+        #[cfg(target_os = "windows")]
+        if let Some(b) = crate::win::image_thumbnail(path, max_px, (THUMB_Q * 100.0) as u8) {
+            return Some(b);
+        }
         portable::image_thumbnail(path, max_px, (THUMB_Q * 100.0) as u8)
     }
 }
@@ -286,6 +290,10 @@ pub fn image_thumb(path: &Path, max_px: u32) -> Option<Vec<u8>> {
 fn video_thumb(path: &Path, max_px: u32, ffmpeg: Option<&Path>) -> Option<Vec<u8>> {
     #[cfg(target_os = "macos")]
     if let Some(b) = crate::mac::video_thumbnail(path, max_px, THUMB_Q) {
+        return Some(b);
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(b) = crate::win::video_thumbnail(path, max_px, (THUMB_Q * 100.0) as u8) {
         return Some(b);
     }
     let ffmpeg = ffmpeg?;
@@ -311,7 +319,18 @@ pub mod portable {
     use image::{DynamicImage, ImageDecoder, ImageReader};
     use std::path::Path;
 
+    /// Full-size decode with orientation applied. On Windows WIC is tried
+    /// first, so HEIC/AVIF/RAW export works when the codec extensions are
+    /// installed.
     pub fn decode(path: &Path) -> Option<DynamicImage> {
+        #[cfg(target_os = "windows")]
+        if let Some(img) = crate::win::decode(path, None) {
+            return Some(img);
+        }
+        decode_portable(path)
+    }
+
+    fn decode_portable(path: &Path) -> Option<DynamicImage> {
         let reader = ImageReader::open(path).ok()?.with_guessed_format().ok()?;
         let mut decoder = reader.into_decoder().ok()?;
         let orientation = decoder.orientation().ok();
@@ -323,7 +342,11 @@ pub mod portable {
     }
 
     pub fn image_thumbnail(path: &Path, max_px: u32, quality: u8) -> Option<Vec<u8>> {
-        let img = decode(path)?.thumbnail(max_px, max_px);
+        // Windows already tried WIC (see thumbs::image_thumb); don't decode twice.
+        encode_jpeg(&decode_portable(path)?.thumbnail(max_px, max_px), quality)
+    }
+
+    pub fn encode_jpeg(img: &DynamicImage, quality: u8) -> Option<Vec<u8>> {
         let mut out = Vec::new();
         let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality);
         DynamicImage::ImageRgb8(img.to_rgb8()).write_with_encoder(enc).ok()?;
