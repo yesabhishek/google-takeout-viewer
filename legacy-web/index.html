@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <title>Google Photos Takeout Viewer</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- Tailwind CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        bg: '#0b0b0d',
+                        fg: '#f5f5f7',
+                        muted: '#a1a1aa',
+                        accent: '#0a84ff',
+                    },
+                    boxShadow: {
+                        mac: '0 8px 24px rgba(0,0,0,0.35)',
+                        macCard: '0 4px 12px rgba(0,0,0,0.4)',
+                        macCardHover: '0 10px 26px rgba(0,0,0,0.55)',
+                    },
+                    borderRadius: {
+                        mac: '10px',
+                        macLg: '12px',
+                    },
+                }
+            }
+        }
+    </script>
+    <style>
+        html,
+        body {
+            background: #0b0b0d;
+            color: #f5f5f7;
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+                system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            line-height: 1.45;
+        }
+
+        .glass {
+            background: rgba(22, 22, 26, .72);
+            -webkit-backdrop-filter: blur(28px) saturate(180%);
+            backdrop-filter: blur(28px) saturate(180%);
+        }
+
+        .glass-weak {
+            background: rgba(255, 255, 255, .06);
+            -webkit-backdrop-filter: blur(8px);
+            backdrop-filter: blur(8px);
+        }
+
+        dialog::backdrop {
+            -webkit-backdrop-filter: blur(28px);
+            backdrop-filter: blur(28px);
+        }
+    </style>
+</head>
+
+<body class="text-fg">
+
+    <!-- Header / Toolbar -->
+    <header class="sticky top-0 z-10 border-b border-white/10 glass">
+        <!-- Toolbar row -->
+        <div class="mx-auto max-w-7xl px-5 h-11 flex items-center gap-4">
+            <h1 class="m-0 text-[16px] font-semibold tracking-[-0.2px]">Takeout Viewer</h1>
+
+            <div class="flex items-center gap-2 flex-1 min-w-0">
+                <button id="btn-open"
+                    class="h-[30px] px-3 rounded-md bg-accent text-white text-[13px] font-semibold shadow hover:brightness-105">Open
+                    folder (File System Access)</button>
+
+                <label for="dir-input" class="hidden">Select directory</label>
+                <input id="dir-input" type="file" webkitdirectory multiple class="hidden" />
+
+                <button id="btn-fallback"
+                    class="h-[30px] px-3 rounded-md border border-white/15 bg-white/10 text-[13px] hover:bg-white/20">Select
+                    directory</button>
+                <button id="btn-files"
+                    class="h-[30px] px-3 rounded-md border border-white/15 bg-white/10 text-[13px] hover:bg-white/20">Pick
+                    files</button>
+
+                <select id="type" class="h-[30px] px-3 rounded-md border border-white/15 bg-white/10 text-[13px]">
+                    <option value="image">Photos</option>
+                    <option value="video">Videos</option>
+                    <option value="">Photos & Videos</option>
+                </select>
+
+                <select id="sort" class="h-[30px] px-3 rounded-md border border-white/15 bg-white/10 text-[13px]">
+                    <option value="takenDesc">Newest first</option>
+                    <option value="takenAsc">Oldest first</option>
+                    <option value="nameAsc">Name A→Z</option>
+                    <option value="nameDesc">Name Z→A</option>
+                </select>
+
+                <input id="q" type="text" placeholder="Search filename or caption..."
+                    class="h-[30px] w-[220px] px-3 rounded-md border border-white/15 bg-white/10 text-[13px] placeholder-white/50">
+
+                <select id="album" class="h-[30px] px-3 rounded-md border border-white/15 bg-white/10 text-[13px]">
+                    <option value="">All folders</option>
+                </select>
+
+                <button id="btn-clear"
+                    class="h-[30px] px-3 rounded-md border border-white/15 bg-white/10 text-[13px] hover:bg-white/20">Clear</button>
+
+                <span class="ml-auto text-[12px] text-muted" id="stats">0 items</span>
+            </div>
+        </div>
+
+        <!-- Subbar: chips + perf -->
+        <div class="mx-auto max-w-7xl px-5 py-3 flex items-center gap-3">
+            <div class="chips flex flex-wrap gap-1.5" id="chips"></div>
+
+            <!-- Performance HUD -->
+            <div id="perf" class="ml-auto flex items-center gap-2 text-[12px] text-slate-400">
+                <span id="perf-items">Scanned: 0</span>
+                <span>-</span>
+                <span id="perf-thumbs">Thumbs: 0</span>
+                <span>-</span>
+                <span id="perf-rate">Rate: 0/s</span>
+                <span>-</span>
+                <span id="perf-lat">Avg thumb: —ms</span>
+                <span>-</span>
+                <span id="perf-score" class="font-semibold text-lime-400">Score: —</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main content -->
+    <main class="mx-auto max-w-7xl px-5 py-6">
+        <div id="grid" class="grid [grid-template-columns:repeat(auto-fill,minmax(224px,1fr))] gap-3"></div>
+    </main>
+
+    <!-- Lightbox -->
+    <dialog id="lightbox"
+        class="rounded-[12px] p-0 max-w-[96vw] max-h-[96vh] text-fg [background:rgba(28,28,32,0.85)] shadow-[0_8px_24px_rgba(0,0,0,0.35)]">
+        <div class="viewer flex flex-col w-[min(90vw,1100px)] h-[min(80vh,820px)]">
+            <div
+                class="bar flex items-center gap-2 p-2 border-b border-white/10 bg-white/5 backdrop-blur-md rounded-t-[12px]">
+                <button id="lb-prev"
+                    class="h-7 px-2.5 rounded-md border border-white/15 bg-white/10 text-[13px] hover:bg-white/20">◀</button>
+                <button id="lb-next"
+                    class="h-7 px-2.5 rounded-md border border-white/15 bg-white/10 text-[13px] hover:bg-white/20">▶</button>
+                <div class="flex-1"></div>
+                <button id="lb-open"
+                    class="h-7 px-2.5 rounded-md border border-white/15 bg-white/10 text-[13px] hover:bg-white/20">Open
+                    original</button>
+                <button id="lb-close"
+                    class="h-7 px-2.5 rounded-md border border-white/15 bg-white/10 text-[13px] hover:bg-white/20">Close</button>
+            </div>
+
+            <div id="lb-stage" class="flex-1 flex items-center justify-center bg-[#0f1116] p-2.5"></div>
+
+            <div id="lb-meta" class="border-t border-white/10 bg-white/5 text-[12px] text-slate-200 rounded-b-[12px]">
+            </div>
+        </div>
+    </dialog>
+
+    <!-- Your logic -->
+    <script src="static/main.js"></script>
+
+    <!-- Optional: minimal card/chip helper styles if rendering via JS -->
+    <style>
+        /* Card shell (apply these classes when creating cards via JS if not using inline utilities) */
+        .card {
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            background: rgba(255, 255, 255, 0.05);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+            overflow: hidden;
+            transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+            position: relative;
+        }
+
+        .card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 26px rgba(0, 0, 0, 0.55);
+            border-color: rgba(255, 255, 255, 0.16);
+        }
+
+        .thumb {
+            width: 100%;
+            height: 164px;
+            object-fit: cover;
+            background: #14171f;
+            display: block;
+        }
+
+        .meta {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 8px 10px;
+            color: #cbd5e1;
+            font-size: 12px;
+        }
+
+        .meta .dim {
+            color: #a1a1aa;
+        }
+
+        .badge {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            background: rgba(25, 25, 28, 0.7);
+            -webkit-backdrop-filter: blur(6px);
+            backdrop-filter: blur(6px);
+            color: #fff;
+            padding: 3px 9px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+    </style>
+</body>
+
+</html>

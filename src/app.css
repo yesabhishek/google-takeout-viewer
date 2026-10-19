@@ -1,0 +1,209 @@
+:root {
+  --bg: #ffffff;
+  --surface: #f8fafd;
+  --surface-2: #eef2f8;
+  --surface-3: #e3e8f0;
+  --text: #1f1f1f;
+  --text-2: #444746;
+  --text-3: #6b6f6e;
+  --primary: #0b57d0;
+  --on-primary: #ffffff;
+  --primary-container: #d3e3fd;
+  --on-primary-container: #041e49;
+  --outline: #c4c7c5;
+  --outline-soft: #e3e3e3;
+  --placeholder: #eceff3;
+  --danger: #b3261e;
+  --scrim: rgba(0, 0, 0, 0.32);
+  --shadow: 0 1px 2px rgba(60, 64, 67, 0.3), 0 2px 6px 2px rgba(60, 64, 67, 0.15);
+  --shadow-lg: 0 4px 8px 3px rgba(60, 64, 67, 0.15), 0 1px 3px rgba(60, 64, 67, 0.3);
+  --radius: 12px;
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable", "Segoe UI", system-ui,
+    Roboto, "Helvetica Neue", Arial, sans-serif;
+  --topbar-h: 64px;
+  --sidebar-w: 256px;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #131314;
+    --surface: #1b1c1d;
+    --surface-2: #26282a;
+    --surface-3: #333537;
+    --text: #e3e3e3;
+    --text-2: #c4c7c5;
+    --text-3: #9aa0a6;
+    --primary: #a8c7fa;
+    --on-primary: #062e6f;
+    --primary-container: #0842a0;
+    --on-primary-container: #d3e3fd;
+    --outline: #5f6368;
+    --outline-soft: #2f3133;
+    --placeholder: #232527;
+    --danger: #f2b8b5;
+    --scrim: rgba(0, 0, 0, 0.55);
+    --shadow: 0 1px 3px rgba(0, 0, 0, 0.6), 0 4px 8px 3px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 6px 18px rgba(0, 0, 0, 0.55);
+    color-scheme: dark;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+}
+
+#app {
+  height: 100%;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+input {
+  font: inherit;
+  color: inherit;
+}
+
+.icon-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: inline-grid;
+  place-items: center;
+  color: var(--text-2);
+  transition: background 0.15s;
+}
+.icon-btn:hover {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+.icon-btn:active {
+  background: color-mix(in srgb, var(--text) 14%, transparent);
+}
+.icon-btn:disabled {
+  opacity: 0.38;
+  pointer-events: none;
+}
+
+.btn {
+  height: 40px;
+  padding: 0 24px;
+  border-radius: 20px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.btn.filled {
+  background: var(--primary);
+  color: var(--on-primary);
+}
+.btn.filled:hover {
+  box-shadow: var(--shadow);
+  background: color-mix(in srgb, var(--primary) 92%, var(--on-primary));
+}
+.btn.tonal {
+  background: var(--primary-container);
+  color: var(--on-primary-container);
+}
+.btn.tonal:hover {
+  box-shadow: var(--shadow);
+}
+.btn.text {
+  padding: 0 12px;
+  color: var(--primary);
+}
+.btn.text:hover {
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
+}
+.btn.outlined {
+  border: 1px solid var(--outline);
+  color: var(--primary);
+}
+.btn.outlined:hover {
+  background: color-mix(in srgb, var(--primary) 6%, transparent);
+}
+.btn:disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.page {
+  height: 100%;
+  overflow-y: auto;
+  padding: 8px 32px 48px;
+}
+
+.page-title {
+  font-size: 22px;
+  font-weight: 400;
+  margin: 16px 0 20px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.muted {
+  color: var(--text-3);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--outline);
+  color: var(--text-2);
+  font-weight: 500;
+  font-size: 13px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--text) 18%, transparent);
+  border-radius: 10px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
