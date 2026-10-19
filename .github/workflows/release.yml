@@ -73,7 +73,7 @@ jobs:
             - **macOS:** open the app once, then go to **System Settings → Privacy & Security** and click **Open Anyway**.
             - **Windows:** on the SmartScreen prompt, click **More info → Run anyway**.
 
-            Windows is an early preview: it hasn't been tested much yet, and HEIC photos don't preview there.
+            Windows is an early preview and hasn't been tested much yet. For iPhone photos, install Microsoft's free **HEIF Image Extensions** from the Microsoft Store; without it, HEIC files don't preview.
 
       - name: Build only
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
