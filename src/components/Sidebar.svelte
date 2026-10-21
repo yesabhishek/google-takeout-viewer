@@ -14,6 +14,7 @@
   import Icon from "./Icon.svelte";
   import { app, navigate, type View } from "../lib/state.svelte";
   import { fmtCount } from "../lib/format";
+  import { openUrl, WEBSITE } from "../lib/api";
 
   type Entry = { label: string; icon: string; view: View; count?: number };
 
@@ -74,6 +75,15 @@
         </div>
       </button>
     {/if}
+    {#if app.status?.drive.struggling}
+      <button class="card warn" onclick={() => navigate({ kind: "library" })}>
+        <Icon path={mdiAlertCircleOutline} size={20} />
+        <div>
+          <div class="t">Drive is having trouble</div>
+          <div class="s">Some files couldn’t be read, so reading has slowed down to protect it.</div>
+        </div>
+      </button>
+    {/if}
     {#if scan?.running}
       <button class="card" onclick={() => navigate({ kind: "library" })}>
         <div class="t">Importing your library</div>
@@ -91,6 +101,7 @@
       <Icon path={mdiHarddisk} />
       <span>Library & storage</span>
     </button>
+    <button class="credit" title="Visit {WEBSITE}" onclick={() => openUrl(WEBSITE)}>Made by Abhishek Choudhury</button>
   </div>
 </nav>
 
@@ -180,6 +191,17 @@
   }
   .card.warn .s {
     white-space: normal;
+  }
+  .credit {
+    margin: 2px 0 0 28px;
+    align-self: flex-start;
+    font-size: 11px;
+    color: var(--text-3);
+    padding: 2px 0;
+  }
+  .credit:hover {
+    color: var(--primary);
+    text-decoration: underline;
   }
   .bar {
     margin-top: 8px;

@@ -18,7 +18,7 @@
   import Icon from "./Icon.svelte";
   import InfoPanel from "./InfoPanel.svelte";
   import { app, toast } from "../lib/state.svelte";
-  import { call, mediaUrl, isTauri, type ItemDetails } from "../lib/api";
+  import { call, mediaUrl, isTauri, isMac, type ItemDetails } from "../lib/api";
   import { FLAG_VIDEO, FLAG_LIVE } from "../lib/timeline";
 
   const v = $derived(app.viewer!);
@@ -223,6 +223,7 @@
   }
   async function openExternal() {
     menu = false;
+    toast("Opening a read-only copy, so the original can’t be changed", undefined, 4000);
     await call("open_external", { id: shownId }).catch((e) => toast(String(e)));
   }
 
@@ -272,8 +273,8 @@
         {#if menu}
           <div class="menu">
             {#if isTauri}
-              <button onclick={reveal}><Icon path={mdiFolderOpenOutline} size={20} /> Show in Finder</button>
-              <button onclick={openExternal}><Icon path={mdiOpenInNew} size={20} /> Open with default app</button>
+              <button onclick={reveal}><Icon path={mdiFolderOpenOutline} size={20} /> Show in {isMac ? "Finder" : "File Explorer"}</button>
+              <button onclick={openExternal}><Icon path={mdiOpenInNew} size={20} /> Open a copy in default app</button>
             {/if}
             {#if details?.originalId}
               <button

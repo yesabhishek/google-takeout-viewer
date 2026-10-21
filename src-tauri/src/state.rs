@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::db::Db;
+use crate::diskio::{self, Mode, DRIVE};
 use crate::thumbs::ThumbService;
 
 type Emitter = Box<dyn Fn(&str, Value) + Send + Sync>;
@@ -19,6 +20,10 @@ pub struct ScanStatus {
     pub found: usize,
     pub message: String,
     pub error: Option<String>,
+    /// Files that could not be read this scan (retried next time).
+    pub skipped: usize,
+    /// Something the user should know about, even though the scan finished.
+    pub warning: Option<String>,
     pub finished_at: Option<i64>,
 }
 
@@ -44,6 +49,7 @@ pub struct AppState {
     pub generation: AtomicU64,
     pub timeline_cache: Mutex<HashMap<String, (u64, Arc<Vec<u8>>)>>,
     emitter: RwLock<Option<Emitter>>,
+    drive_reason: Mutex<String>,
 }
 
 impl AppState {
@@ -55,7 +61,7 @@ impl AppState {
         let thumbs = ThumbService::new(db.clone(), thumb_dir);
         let paused = db.setting("thumbs_paused").as_deref() == Some("1");
         thumbs.set_paused(paused);
-        Ok(Arc::new(AppState {
+        let state = Arc::new(AppState {
             db,
             data_dir: data_dir.to_path_buf(),
             thumbs,
@@ -66,7 +72,76 @@ impl AppState {
             generation: AtomicU64::new(1),
             timeline_cache: Mutex::new(HashMap::new()),
             emitter: RwLock::new(None),
-        }))
+            drive_reason: Mutex::new(String::new()),
+        });
+        state.apply_drive_mode();
+        Ok(state)
+    }
+
+    /// Set how hard the drive is read: the saved choice, or for "auto" the
+    /// gentlest mode that suits where the library folders are.
+    pub fn apply_drive_mode(&self) {
+        let choice = self.db.setting("drive_mode").unwrap_or_else(|| "auto".into());
+        let (mode, reason) = match Mode::parse(&choice) {
+            Some(m) => (m, "You chose this."),
+            None => {
+                let sources: Vec<String> = self
+                    .db
+                    .read(|c| {
+                        let mut st = c.prepare("SELECT path FROM sources")?;
+                        let rows = st.query_map([], |r| r.get(0))?;
+                        rows.collect()
+                    })
+                    .unwrap_or_default();
+                let sources: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
+                diskio::auto_mode(&sources)
+            }
+        };
+        DRIVE.set_mode(mode);
+        *self.drive_reason.lock().unwrap() = reason.to_string();
+    }
+
+    pub fn drive_info(&self) -> Value {
+        serde_json::json!({
+            "choice": self.db.setting("drive_mode").unwrap_or_else(|| "auto".into()),
+            "mode": DRIVE.mode().as_str(),
+            "reason": self.drive_reason.lock().unwrap().clone(),
+            "struggling": DRIVE.struggling(),
+        })
+    }
+
+    /// Read-only copies handed to other apps ("Open in Preview"), so an
+    /// editor can never save over an original.
+    pub fn open_copies_dir(&self) -> PathBuf {
+        self.data_dir.join("open-copies")
+    }
+
+    /// Remove last session's read-only copies. Only files inside our own
+    /// `open-copies` folder are touched.
+    pub fn clean_open_copies(&self) {
+        let Ok(entries) = std::fs::read_dir(self.open_copies_dir()) else { return };
+        for e in entries.flatten() {
+            let p = e.path();
+            if !e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                continue;
+            }
+            self.clean_open_copy(&p);
+        }
+    }
+
+    /// Delete one of our read-only copies (Windows won't delete a read-only file).
+    pub fn clean_open_copy(&self, p: &Path) {
+        if !p.starts_with(self.open_copies_dir()) {
+            return;
+        }
+        #[cfg(windows)]
+        if let Ok(m) = std::fs::metadata(p) {
+            let mut perm = m.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perm.set_readonly(false);
+            let _ = std::fs::set_permissions(p, perm);
+        }
+        let _ = std::fs::remove_file(p);
     }
 
     pub fn set_emitter(&self, f: Emitter) {

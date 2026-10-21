@@ -1,8 +1,33 @@
-# Takeout Viewer
+<p align="center">
+  <img src="src-tauri/icons/128x128@2x.png" width="128" height="128" alt="Takeout Viewer icon: photos rising out of an open box">
+</p>
+
+<h1 align="center">Takeout Viewer</h1>
+
+<p align="center"><b>Your Google Photos export, browsable again. Private, read-only and gentle on old drives.</b></p>
+
+<p align="center">Made by <a href="https://abhishekchoudhury.com">Abhishek Choudhury</a></p>
 
 A fast, private desktop app for browsing a **Google Photos Takeout** export: hundreds of gigabytes of photos, videos and Live Photos, straight from the folder or external drive you unzipped it to. The interface follows Google Photos: a justified timeline grouped by day, a year scrubber, People, Albums, Favorites, a full-screen viewer and multi-select export.
 
 Built with a Rust core ([Tauri 2](https://tauri.app)) and a small Svelte UI. The app bundle is about 8 MB, and nothing is uploaded, copied or modified.
+
+## Why
+
+Google Takeout hands you your whole photo library as a pile of zip files and JSON sidecars. That's great for owning your memories and terrible for actually looking at them. Takeout Viewer makes that archive feel like Google Photos again, on your own computer, offline, and without ever putting the originals at risk.
+
+## Safe by design
+
+Takeout exports often end up on an old external hard drive, and they're usually the only copy. So the app treats them as read-only and reads them gently:
+
+- **Originals are never written to.** Files in a Takeout folder are only opened for reading. Exports and the app's own data are refused inside a Takeout folder, and removing a folder only forgets its index.
+- **Exports never overwrite anything.** Every file gets a name nobody else has (created atomically, so `photo.jpg` becomes `photo (2).jpg` if it exists). It's written to a `.partial` file, size-checked, flushed to disk and only then renamed into place, so a cancelled export, a full disk or a pulled cable leaves no half-written files.
+- **"Open with default app" opens a read-only copy**, so an editor like Preview can't save changes over the original.
+- **Drive care.** Every read of an original goes through one pacer. *Gentle* reads one file at a time and rests between files; *Balanced* reads two; *Fast* uses every core. *Auto* (the default) picks Gentle for external hard drives and Balanced for SSDs. Whatever is on screen gets a reserved slot so browsing stays responsive, background thumbnails wait while a scan runs, and a run of read errors slows everything down instead of hammering a failing disk.
+- **Disconnects are not deletions.** If the drive disappears mid-scan, the scan stops and the index is kept as it was. Folders that can't be listed, or that suddenly look empty, keep their entries, and files that can't be read are retried on the next scan instead of being indexed with made-up dates.
+- **Recoverable index.** If the index database is ever damaged (power loss, full disk), it's moved aside and rebuilt from your Takeout. It never holds anything that isn't in your Takeout already.
+
+`src-tauri/src/safety_tests.rs` checks this end to end: it indexes a Takeout, makes thumbnails, exports three times, opens a copy, clears the cache and removes the folder, then verifies every original is byte-for-byte identical with the same timestamps.
 
 ## Features
 
@@ -18,6 +43,7 @@ Built with a Rust core ([Tauri 2](https://tauri.app)) and a small Svelte UI. The
 - **Export.** Export any selection, album, person or search result as the originals, or convert to JPEG, PNG, HEIC, AVIF or TIFF (whatever macOS can encode). You can pick a size and quality, include Live Photo clips, and keep EXIF/GPS. File dates are set to the capture time.
 - **Search** by file name, description, person, album, camera, year (`2019`) or month (`july`).
 - **Works with the drive unplugged.** Thumbnails are cached locally, so you can browse everything. Originals open once the drive is back.
+- **Drive care.** Gentle, Balanced and Fast reading modes (see [Safe by design](#safe-by-design)), chosen automatically per drive.
 
 ## Download
 
@@ -67,6 +93,7 @@ src-tauri/src/
   thumbs.rs    thumbnail cache: visible tiles first (LIFO), then background pre-generation
   protocol.rs  gp:// media protocol: thumbnails, originals with byte ranges, Live clips
   export.rs    copy / convert / resize, Live clips, file dates
+  diskio.rs    drive care: paces every read of an original (concurrency, rests, error back-off)
   api.rs       command surface shared by Tauri IPC and the HTTP dev bridge
 src/           Svelte 5 UI. The grid is virtualized: ~40 DOM tiles regardless of library size
 ```
@@ -127,4 +154,4 @@ To build without releasing (for example, to try the Windows build), run the **Re
 
 ## License
 
-MIT
+MIT. Made by [Abhishek Choudhury](https://abhishekchoudhury.com).

@@ -1,16 +1,21 @@
 //! Export selected items to a folder: as originals or converted to
 //! JPEG / PNG / TIFF / HEIC / WebP, optionally resized, with capture dates
 //! written to the file times.
+//!
+//! Safety rules: originals are only read. Every output gets a name nobody else
+//! has (`create_new`, so an existing file is never overwritten), is written to
+//! a `.partial` file, checked, flushed to disk and only then renamed into
+//! place. Exporting into a Takeout folder is refused.
 
 use rayon::prelude::*;
 use serde::Deserialize;
-use std::collections::HashSet;
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use crate::diskio::{self, Prio, DRIVE};
 use crate::state::AppState;
 use crate::takeout;
 
@@ -89,19 +94,63 @@ fn load(state: &AppState, id: i64) -> Option<ExportItem> {
     Some(ExportItem { path: PathBuf::from(path), name, kind, taken, live_video, motion, motion_offset, id })
 }
 
-/// Reserve a file name in `dest` that does not exist yet ("name (2).jpg").
-fn reserve(dest: &Path, stem: &str, ext: &str, taken: &Mutex<HashSet<PathBuf>>) -> PathBuf {
-    let mut set = taken.lock().unwrap();
-    let mut n = 1;
-    loop {
-        let file = if n == 1 { format!("{stem}.{ext}") } else { format!("{stem} ({n}).{ext}") };
-        let p = dest.join(file);
-        if !set.contains(&p) && !p.exists() {
-            set.insert(p.clone());
-            return p;
-        }
-        n += 1;
+fn file_name(stem: &str, ext: &str, n: u32) -> String {
+    let stem = if n == 1 { stem.to_string() } else { format!("{stem} ({n})") };
+    if ext.is_empty() {
+        stem
+    } else {
+        format!("{stem}.{ext}")
     }
+}
+
+/// Claim a free file name in `dest` ("name (2).jpg" if taken) by creating it
+/// empty. `create_new` is atomic, so a file that already exists, whoever made
+/// it, is never overwritten.
+fn reserve(dest: &Path, stem: &str, ext: &str) -> std::io::Result<PathBuf> {
+    for n in 1..100_000 {
+        let p = dest.join(file_name(stem, ext, n));
+        match OpenOptions::new().write(true).create_new(true).open(&p) {
+            Ok(_) => return Ok(p),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(ErrorKind::AlreadyExists, "too many files with this name"))
+}
+
+/// Write one output: into `<name>.partial`, flushed to disk, then renamed over
+/// the empty file `reserve` made. On failure both are removed (they are ours),
+/// so a cancelled or failed export never leaves half-written files behind.
+fn write_reserved(out: &Path, write: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), String> {
+    let name = out.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let mut tmp = None;
+    for n in 0..100 {
+        let p = out.with_file_name(if n == 0 { format!("{name}.partial") } else { format!("{name}.{n}.partial") });
+        match OpenOptions::new().write(true).create_new(true).open(&p) {
+            Ok(_) => {
+                tmp = Some(p);
+                break;
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                let _ = std::fs::remove_file(out);
+                return Err(e.to_string());
+            }
+        }
+    }
+    let Some(tmp) = tmp else {
+        let _ = std::fs::remove_file(out);
+        return Err("could not create a temporary file".into());
+    };
+    let res = write(&tmp).and_then(|_| {
+        OpenOptions::new().write(true).open(&tmp).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, out).map_err(|e| e.to_string())
+    });
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(out);
+    }
+    res
 }
 
 fn set_times(p: &Path, ts: i64) {
@@ -109,19 +158,56 @@ fn set_times(p: &Path, ts: i64) {
     let _ = filetime::set_file_times(p, t, t);
 }
 
-fn copy_range(src: &Path, offset: u64, dst: &Path) -> std::io::Result<()> {
+/// Copy `src` from `offset` to the end into `dst`, and check every byte arrived.
+pub fn copy_verified(src: &Path, offset: u64, dst: &Path) -> std::io::Result<()> {
     let mut f = File::open(src)?;
+    let expected = f.metadata()?.len().saturating_sub(offset);
     f.seek(SeekFrom::Start(offset))?;
-    let mut out = File::create(dst)?;
+    let mut out = OpenOptions::new().write(true).truncate(true).open(dst)?;
     let mut buf = vec![0u8; 1 << 20];
+    let mut copied = 0u64;
     loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
+        let n = match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
         out.write_all(&buf[..n])?;
+        copied += n as u64;
+    }
+    out.flush()?;
+    if copied != expected || out.metadata()?.len() != expected {
+        return Err(std::io::Error::other(format!("copy incomplete ({copied} of {expected} bytes)")));
     }
     Ok(())
+}
+
+/// A readable error, stopping the whole export when the destination is full.
+fn io_fail(state: &AppState, what: &str, e: std::io::Error) -> String {
+    if e.kind() == ErrorKind::StorageFull {
+        state.export_cancel.store(true, Ordering::SeqCst);
+        return "The destination is full, so the export was stopped.".into();
+    }
+    format!("{what}: {e}")
+}
+
+/// Copy a whole original (or the clip inside a motion photo) to a new file.
+fn export_copy(state: &AppState, src: &Path, offset: u64, dest: &Path, stem: &str, ext: &str, what: &str) -> Result<PathBuf, String> {
+    let out = reserve(dest, stem, ext).map_err(|e| io_fail(state, what, e))?;
+    let mut copy_err = None;
+    write_reserved(&out, |tmp| {
+        copy_verified(src, offset, tmp).map_err(|e| {
+            let msg = e.to_string();
+            copy_err = Some(e);
+            msg
+        })
+    })
+    .map_err(|e| match copy_err.take() {
+        Some(io) => io_fail(state, what, io),
+        None => format!("{what}: {e}"),
+    })?;
+    Ok(out)
 }
 
 fn convert(src: &Path, dst: &Path, fmt: &Format, quality: f64, max_px: Option<u32>) -> Result<(), String> {
@@ -152,9 +238,10 @@ fn convert(src: &Path, dst: &Path, fmt: &Format, quality: f64, max_px: Option<u3
     }
 }
 
-fn export_one(state: &AppState, it: &ExportItem, dest: &Path, o: &ExportOptions, names: &Mutex<HashSet<PathBuf>>) -> Result<(), String> {
+fn export_one(state: &AppState, it: &ExportItem, dest: &Path, o: &ExportOptions) -> Result<(), String> {
+    let _drive = DRIVE.acquire(Prio::Background);
     if !it.path.exists() {
-        return Err(format!("{}: file is offline", it.name));
+        return Err(format!("{}: the drive with this file isn't connected", it.name));
     }
     let src_ext = takeout::ext_of(&it.name);
     let stem = takeout::stem_of(&it.name).to_string();
@@ -165,8 +252,7 @@ fn export_one(state: &AppState, it: &ExportItem, dest: &Path, o: &ExportOptions,
         if !o.include_videos.unwrap_or(true) {
             return Ok(());
         }
-        let out = reserve(dest, &stem, &src_ext, names);
-        std::fs::copy(&it.path, &out).map_err(|e| format!("{}: {e}", it.name))?;
+        let out = export_copy(state, &it.path, 0, dest, &stem, &src_ext, &it.name)?;
         if keep_dates {
             set_times(&out, it.taken);
         }
@@ -179,16 +265,12 @@ fn export_one(state: &AppState, it: &ExportItem, dest: &Path, o: &ExportOptions,
     });
     let out = match fmt {
         Some(f) if !(same_format && o.max_px.is_none()) => {
-            let out = reserve(dest, &stem, f.ext, names);
-            convert(&it.path, &out, f, o.quality.unwrap_or(0.92), o.max_px)
+            let out = reserve(dest, &stem, f.ext).map_err(|e| io_fail(state, &it.name, e))?;
+            write_reserved(&out, |tmp| convert(&it.path, tmp, f, o.quality.unwrap_or(0.92), o.max_px))
                 .map_err(|e| format!("{}: {e}", it.name))?;
             out
         }
-        _ => {
-            let out = reserve(dest, &stem, &src_ext, names);
-            std::fs::copy(&it.path, &out).map_err(|e| format!("{}: {e}", it.name))?;
-            out
-        }
+        _ => export_copy(state, &it.path, 0, dest, &stem, &src_ext, &it.name)?,
     };
     if keep_dates {
         set_times(&out, it.taken);
@@ -196,16 +278,13 @@ fn export_one(state: &AppState, it: &ExportItem, dest: &Path, o: &ExportOptions,
 
     if o.include_motion.unwrap_or(false) {
         if let Some((vpath, vname)) = &it.live_video {
-            let ext = takeout::ext_of(vname);
-            let vout = reserve(dest, &stem, &ext, names);
-            std::fs::copy(vpath, &vout).map_err(|e| format!("{vname}: {e}"))?;
+            let vout = export_copy(state, vpath, 0, dest, &stem, &takeout::ext_of(vname), vname)?;
             if keep_dates {
                 set_times(&vout, it.taken);
             }
         } else if it.motion {
             if let Some(off) = crate::protocol::motion_offset(state, it.id, &it.path, it.motion_offset) {
-                let vout = reserve(dest, &stem, "mp4", names);
-                copy_range(&it.path, off, &vout).map_err(|e| format!("{}: {e}", it.name))?;
+                let vout = export_copy(state, &it.path, off, dest, &stem, "mp4", &it.name)?;
                 if keep_dates {
                     set_times(&vout, it.taken);
                 }
@@ -215,10 +294,27 @@ fn export_one(state: &AppState, it: &ExportItem, dest: &Path, o: &ExportOptions,
     Ok(())
 }
 
+/// Exports go next to your library, never into it.
+fn check_destination(state: &AppState, dest: &Path) -> Result<(), String> {
+    let sources: Vec<String> = state.db.read(|c| {
+        let mut st = c.prepare("SELECT path FROM sources")?;
+        let rows = st.query_map([], |r| r.get(0))?;
+        rows.collect()
+    })?;
+    if sources.iter().any(|s| diskio::inside(dest, Path::new(s))) {
+        return Err("Choose a folder outside your Takeout folder. Takeout Viewer never writes into your originals.".into());
+    }
+    if diskio::inside(dest, &state.data_dir) {
+        return Err("Choose another folder: that one holds Takeout Viewer's own index and thumbnails.".into());
+    }
+    Ok(())
+}
+
 pub fn start(state: &Arc<AppState>, ids: Vec<i64>, dest: PathBuf, opts: ExportOptions) -> Result<(), String> {
     if state.export.lock().unwrap().running {
         return Err("An export is already running".into());
     }
+    check_destination(state, &dest)?;
     std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
     state.export_cancel.store(false, Ordering::SeqCst);
     let total = ids.len();
@@ -232,7 +328,6 @@ pub fn start(state: &Arc<AppState>, ids: Vec<i64>, dest: PathBuf, opts: ExportOp
     });
     let st = state.clone();
     std::thread::spawn(move || {
-        let names = Mutex::new(HashSet::new());
         let done = AtomicUsize::new(0);
         let pool = rayon::ThreadPoolBuilder::new().num_threads(4).build().expect("export pool");
         pool.install(|| {
@@ -241,7 +336,7 @@ pub fn start(state: &Arc<AppState>, ids: Vec<i64>, dest: PathBuf, opts: ExportOp
                     return;
                 }
                 let res = match load(&st, id) {
-                    Some(it) => export_one(&st, &it, &dest, &opts, &names).map(|_| it.name),
+                    Some(it) => export_one(&st, &it, &dest, &opts).map(|_| it.name),
                     None => Err(format!("item {id} not found")),
                 };
                 let d = done.fetch_add(1, Ordering::SeqCst) + 1;
@@ -263,4 +358,52 @@ pub fn start(state: &Arc<AppState>, ids: Vec<i64>, dest: PathBuf, opts: ExportOp
         st.emit("export-done", serde_json::to_value(st.export.lock().unwrap().clone()).unwrap_or_default());
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("tv-export-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn never_overwrites() {
+        let d = tmpdir("reserve");
+        std::fs::write(d.join("a.jpg"), b"precious").unwrap();
+        assert_eq!(reserve(&d, "a", "jpg").unwrap(), d.join("a (2).jpg"));
+        assert_eq!(reserve(&d, "a", "jpg").unwrap(), d.join("a (3).jpg"));
+        assert_eq!(std::fs::read(d.join("a.jpg")).unwrap(), b"precious");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn failed_write_leaves_nothing() {
+        let d = tmpdir("partial");
+        let out = reserve(&d, "x", "jpg").unwrap();
+        let r = write_reserved(&out, |tmp| {
+            std::fs::write(tmp, b"half").unwrap();
+            Err("boom".into())
+        });
+        assert!(r.is_err());
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 0);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn verified_copy() {
+        let d = tmpdir("copy");
+        let src = d.join("src.bin");
+        let data: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&src, &data).unwrap();
+        let out = reserve(&d, "copy", "bin").unwrap();
+        write_reserved(&out, |tmp| copy_verified(&src, 0, tmp).map_err(|e| e.to_string())).unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), data);
+        assert!(!d.join("copy.bin.partial").exists());
+        std::fs::remove_dir_all(&d).ok();
+    }
 }

@@ -67,7 +67,32 @@ export function fmtAgo(ts: number | null): string {
   if (d < 60) return "just now";
   if (d < 3600) return `${Math.floor(d / 60)} min ago`;
   if (d < 86400) return `${Math.floor(d / 3600)} h ago`;
-  return fmtLongDate(ts);
+  if (d < 2 * 86400) return "yesterday";
+  if (d < 7 * 86400) return `${Math.floor(d / 86400)} days ago`;
+  return `on ${fmtLongDate(ts)}`;
+}
+
+/**
+ * A library folder as people think of it: its name, and where it lives
+ * ("Western Digital Passport › Google Photos Backup").
+ */
+export function describeFolder(path: string): { name: string; where: string; external: boolean } {
+  const p = path.replace(/^\\\\\?\\/, ""); // Windows long-path prefix
+  const parts = p.split(/[\\/]/).filter(Boolean);
+  const name = parts.pop() ?? p;
+  let crumbs = parts;
+  let external = false;
+  const home = p.match(/^\/Users\/[^/]+/)?.[0];
+  if (p.startsWith("/Volumes/")) {
+    external = true;
+    crumbs = parts.slice(1); // drop "Volumes"
+  } else if (/^[A-Za-z]:/.test(p)) {
+    external = !/^C:/i.test(p);
+  } else if (home) {
+    crumbs = ["~", ...parts.slice(2)];
+  }
+  if (crumbs.length > 4) crumbs = [crumbs[0], "…", ...crumbs.slice(-2)];
+  return { name, where: crumbs.join(" › ") || "/", external };
 }
 
 /** Shorten a long path with a middle ellipsis, keeping the start and the folder name. */

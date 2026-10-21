@@ -9,6 +9,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::diskio::{Prio, DRIVE};
 use crate::state::AppState;
 use crate::takeout;
 use crate::thumbs::ThumbResult;
@@ -42,6 +43,7 @@ impl Resp {
             Body::Bytes(b) => Arc::try_unwrap(b).unwrap_or_else(|a| (*a).clone()),
             Body::File { path, start, len } => {
                 let mut buf = vec![0u8; len as usize];
+                let _drive = DRIVE.acquire(Prio::Interactive);
                 let ok = File::open(&path)
                     .and_then(|mut f| {
                         f.seek(SeekFrom::Start(start))?;
@@ -194,7 +196,10 @@ pub fn motion_offset(state: &AppState, id: i64, row_path: &std::path::Path, know
     if let Some(o) = known {
         return if o > 0 { Some(o as u64) } else { None };
     }
-    let found = crate::meta::find_motion_offset(row_path);
+    let found = {
+        let _drive = DRIVE.acquire(Prio::Interactive);
+        crate::meta::find_motion_offset(row_path)
+    };
     let store = found.map(|o| o as i64).unwrap_or(-1);
     let _ = state
         .db
@@ -253,7 +258,11 @@ pub fn handle(state: Arc<AppState>, path: &str, range: Option<String>, reply: Re
             let Some(row) = media_row(&state, id) else {
                 return reply(Resp::text(404, "not found"));
             };
-            match crate::thumbs::image_thumb(&row.path, 3072) {
+            let preview = {
+                let _drive = DRIVE.acquire(Prio::Interactive);
+                crate::thumbs::image_thumb(&row.path, 3072)
+            };
+            match preview {
                 Some(b) => reply(Resp::bytes(200, "image/jpeg", Arc::new(b))),
                 None => reply(Resp::text(415, "cannot decode")),
             }

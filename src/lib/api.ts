@@ -51,20 +51,23 @@ export async function confirmDialog(message: string, okLabel = "OK"): Promise<bo
   return ask(message, { title: "Takeout Viewer", kind: "warning", okLabel, cancelLabel: "Cancel" });
 }
 
+/** Show a library folder or the last export folder in Finder / Explorer. */
 export async function revealPath(path: string) {
   if (!isTauri) return;
-  const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
-  await revealItemInDir(path);
+  await call("reveal_path", { path });
 }
 
+/** Open one of the app's own web links (website, GitHub) in the browser. */
 export async function openUrl(url: string) {
   if (!isTauri) {
-    window.open(url, "_blank");
+    window.open(url, "_blank", "noopener");
     return;
   }
-  const { openUrl } = await import("@tauri-apps/plugin-opener");
-  await openUrl(url);
+  await call("open_link", { url });
 }
+
+export const WEBSITE = "https://abhishekchoudhury.com";
+export const REPO = "https://github.com/yesabhishek/google-takeout-viewer";
 
 // ---------------------------------------------------------------------------
 // Types mirrored from the Rust side
@@ -85,6 +88,8 @@ export interface ScanStatus {
   found: number;
   message: string;
   error: string | null;
+  skipped: number;
+  warning: string | null;
   finished_at: number | null;
 }
 
@@ -109,6 +114,20 @@ export interface Status {
   platform: string;
   dataDir: string;
   ffmpeg: boolean;
+  drive: DriveInfo;
+  version: string;
+}
+
+export type DriveMode = "gentle" | "balanced" | "fast";
+
+export interface DriveInfo {
+  /** What the user picked; "auto" lets the app decide per drive. */
+  choice: DriveMode | "auto";
+  /** The mode in effect. */
+  mode: DriveMode;
+  reason: string;
+  /** Recent reads keep failing: the drive may be failing or loosely connected. */
+  struggling: boolean;
 }
 
 export interface Person {

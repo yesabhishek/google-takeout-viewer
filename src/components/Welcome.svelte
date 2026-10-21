@@ -3,16 +3,16 @@
   import Icon from "./Icon.svelte";
   import Logo from "./Logo.svelte";
   import { addFolder } from "../lib/actions";
-  import { isTauri } from "../lib/api";
+  import { isTauri, isMac, openUrl, WEBSITE } from "../lib/api";
 </script>
 
 <div class="welcome">
   <div class="hero">
-    <Logo size={72} />
-    <h1>Your Google Photos, at home on your Mac</h1>
+    <Logo size={84} />
+    <h1>Your Google Photos, at home on your {isMac ? "Mac" : "computer"}</h1>
     <p class="lede">
-      Choose the folder where you unzipped your Google Takeout export — or the external drive that holds it. Takeout
-      Viewer reads it in place: nothing is uploaded, copied or changed.
+      Choose the folder where you unzipped your Google Takeout export, or the external drive that holds it. Takeout
+      Viewer reads it in place. Nothing is uploaded, and your files are never changed.
     </p>
     <button class="btn filled big" onclick={addFolder}>
       <Icon path={mdiFolderSearchOutline} size={22} /> Choose Takeout folder
@@ -38,11 +38,13 @@
     <div class="tip">
       <Icon path={mdiShieldCheckOutline} />
       <div>
-        <b>Private by design</b>
-        <span>Everything runs locally. Unzip all <code>takeout-*.zip</code> parts into one parent folder — split archives are merged automatically.</span>
+        <b>Safe for old drives</b>
+        <span>Read-only, gently paced for external hard drives, and nothing leaves your {isMac ? "Mac" : "computer"}. Unzip all <code>takeout-*.zip</code> parts into one folder; split archives are merged.</span>
       </div>
     </div>
   </div>
+
+  <button class="credit" onclick={() => openUrl(WEBSITE)}>Made by Abhishek Choudhury · abhishekchoudhury.com</button>
 </div>
 
 <style>
@@ -112,6 +114,14 @@
     color: var(--text);
     font-weight: 500;
     font-size: 14px;
+  }
+  .credit {
+    font-size: 12px;
+    color: var(--text-3);
+    margin-top: -24px;
+  }
+  .credit:hover {
+    color: var(--primary);
   }
   code {
     font-size: 12px;

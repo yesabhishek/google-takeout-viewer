@@ -12,6 +12,10 @@ pub fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
 
+fn is_corrupt(e: &str) -> bool {
+    e.contains("not a database") || e.contains("malformed") || e.contains("corrupt")
+}
+
 pub struct Db {
     writer: Mutex<Connection>,
     readers: Vec<Mutex<Connection>>,
@@ -113,7 +117,26 @@ fn tune(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 impl Db {
+    /// Open the index. A damaged index file (power loss, full disk) is moved
+    /// aside and rebuilt by the next scan; it only ever holds data derived
+    /// from your Takeout, never the photos themselves.
     pub fn open(path: &Path) -> DbResult<Db> {
+        match Db::open_once(path) {
+            Err(e) if is_corrupt(&e) && path.exists() => {
+                let aside = path.with_extension(format!("sqlite3.damaged-{}", crate::scan::now()));
+                std::fs::rename(path, &aside).map_err(err)?;
+                for suffix in ["-wal", "-shm"] {
+                    let from = format!("{}{suffix}", path.display());
+                    let _ = std::fs::rename(&from, format!("{}{suffix}", aside.display()));
+                }
+                eprintln!("index was damaged; moved to {} and starting fresh", aside.display());
+                Db::open_once(path)
+            }
+            r => r,
+        }
+    }
+
+    fn open_once(path: &Path) -> DbResult<Db> {
         let writer = Connection::open(path).map_err(err)?;
         tune(&writer).map_err(err)?;
         writer.execute_batch(SCHEMA).map_err(err)?;

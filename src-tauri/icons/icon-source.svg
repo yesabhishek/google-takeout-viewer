@@ -1,21 +1,63 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#3b6cf6"/>
-      <stop offset="1" stop-color="#7a4ff0"/>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#21468C"/>
+      <stop offset="1" stop-color="#0C1F44"/>
     </linearGradient>
-    <linearGradient id="sun" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#ffd36b"/>
-      <stop offset="1" stop-color="#ff9f43"/>
+    <radialGradient id="glow" cx="0.3" cy="0.2" r="0.8">
+      <stop offset="0" stop-color="#5B8CFF" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#5B8CFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="box" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFB347"/>
+      <stop offset="1" stop-color="#F2711C"/>
     </linearGradient>
-    <clipPath id="card"><rect x="232" y="252" width="560" height="520" rx="72"/></clipPath>
+    <linearGradient id="flap" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFD08A"/>
+      <stop offset="1" stop-color="#FFB04A"/>
+    </linearGradient>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6CC4FF"/>
+      <stop offset="1" stop-color="#D7F0FF"/>
+    </linearGradient>
+    <linearGradient id="sky2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FF9A8B"/>
+      <stop offset="1" stop-color="#FFD3A5"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#06142E" flood-opacity="0.45"/>
+    </filter>
+    <clipPath id="body"><rect x="100" y="100" width="824" height="824" rx="186"/></clipPath>
   </defs>
-  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
-  <rect x="282" y="196" width="460" height="60" rx="30" fill="#ffffff" opacity="0.35"/>
-  <g clip-path="url(#card)">
-    <rect x="232" y="252" width="560" height="520" fill="#eaf1ff"/>
-    <circle cx="628" cy="400" r="64" fill="url(#sun)"/>
-    <path d="M232 700 L420 488 L548 628 L620 556 L792 720 L792 772 L232 772 Z" fill="#3b6cf6"/>
-    <path d="M232 772 L232 720 L420 560 L600 772 Z" fill="#2648b8"/>
+  <g filter="url(#shadow)">
+    <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#bg)"/>
+  </g>
+  <g clip-path="url(#body)">
+    <rect x="100" y="100" width="824" height="824" fill="url(#glow)"/>
+    <!-- back rim of the open box -->
+    <rect x="250" y="548" width="524" height="80" rx="24" fill="#B4500F"/>
+    <!-- back photo -->
+    <g transform="rotate(-13 420 430)" filter="url(#soft)">
+      <rect x="276" y="276" width="288" height="320" rx="22" fill="#F4F7FB"/>
+      <rect x="300" y="300" width="240" height="220" rx="10" fill="url(#sky2)"/>
+      <path d="M300 470 L370 410 L430 455 L480 420 L540 470 L540 520 L300 520 Z" fill="#E8590C"/>
+    </g>
+    <!-- front photo -->
+    <g transform="rotate(9 580 420)" filter="url(#soft)">
+      <rect x="420" y="236" width="320" height="360" rx="24" fill="#FFFFFF"/>
+      <rect x="446" y="262" width="268" height="250" rx="12" fill="url(#sky)"/>
+      <circle cx="652" cy="322" r="34" fill="#FFD43B"/>
+      <path d="M446 470 L530 380 L600 450 L640 412 L714 480 L714 512 L446 512 Z" fill="#2F9E44"/>
+      <path d="M446 512 L446 488 L540 430 L640 512 Z" fill="#237A35"/>
+    </g>
+    <!-- flaps -->
+    <path d="M236 600 L420 600 L372 512 L170 512 Z" fill="url(#flap)"/>
+    <path d="M788 600 L604 600 L652 512 L854 512 Z" fill="url(#flap)"/>
+    <!-- front of the box -->
+    <rect x="236" y="584" width="552" height="236" rx="44" fill="url(#box)"/>
+    <rect x="236" y="584" width="552" height="22" rx="11" fill="#FFFFFF" opacity="0.25"/>
   </g>
 </svg>

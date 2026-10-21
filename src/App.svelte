@@ -12,7 +12,7 @@
   import ExportDialog from "./components/ExportDialog.svelte";
   import Icon from "./components/Icon.svelte";
   import { app, back, filterOf, refreshStatus, toast, viewKey } from "./lib/state.svelte";
-  import { isTauri, mediaUrl, onEvent, revealPath, call, type ExportStatus, type ScanStatus } from "./lib/api";
+  import { isTauri, isMac, mediaUrl, onEvent, revealPath, call, type ExportStatus, type ScanStatus } from "./lib/api";
   import { addSource } from "./lib/actions";
   import { fmtCount, fmtRange, plural } from "./lib/format";
 
@@ -71,7 +71,7 @@
     if (lastExport?.running && !e.running) {
       const ok = e.done - e.failed;
       const msg = e.failed ? `Exported ${fmtCount(ok)} of ${fmtCount(e.total)} — ${e.failed} failed` : `Exported ${plural(ok, "item")}`;
-      toast(msg, isTauri ? { label: "Show in Finder", run: () => revealPath(e.dest) } : undefined, 9000);
+      toast(msg, isTauri ? { label: isMac ? "Show in Finder" : "Show folder", run: () => revealPath(e.dest) } : undefined, 9000);
       if (e.errors.length) console.warn("export errors", e.errors);
     }
     lastExport = e;

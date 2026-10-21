@@ -1,6 +1,7 @@
 mod api;
 mod db;
 mod devserver;
+mod diskio;
 mod export;
 #[cfg(target_os = "macos")]
 mod mac;
@@ -8,6 +9,8 @@ mod mac;
 mod win;
 mod meta;
 mod protocol;
+#[cfg(test)]
+mod safety_tests;
 mod scan;
 mod state;
 mod takeout;
@@ -144,6 +147,14 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        // One window, one scanner: a second launch focuses the running app
+        // instead of reading the same drive twice.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .register_asynchronous_uri_scheme_protocol("gp", |ctx, request, responder| {
@@ -189,9 +200,13 @@ pub fn run() {
                 let _ = handle.emit(name, payload);
             }));
             app.manage(state.clone());
-            std::thread::spawn(move || state.queue_all_thumbs());
+            std::thread::spawn(move || {
+                state.clean_open_copies();
+                state.queue_all_thumbs()
+            });
             // Development aid: run a script inside the real web view, e.g. to
             // check media playback in WebKit (results come back via `log`).
+            #[cfg(debug_assertions)]
             if let Some(probe) = std::env::var_os("TAKEOUT_VIEWER_PROBE") {
                 if let Some(w) = app.get_webview_window("main") {
                     std::thread::spawn(move || {

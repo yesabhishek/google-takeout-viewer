@@ -1,6 +1,7 @@
 //! Local HTTP bridge exposing the same API and media routes, so the UI can be
 //! developed and tested in a normal browser: `takeout-viewer serve`.
-//! Binds to 127.0.0.1 only.
+//! Binds to 127.0.0.1 and only answers the dev UI, so other web pages open in
+//! the same browser can't read your photos through it.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -8,8 +9,11 @@ use std::sync::Arc;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 use crate::api::{self, Out};
+use crate::diskio::{Prio, DRIVE};
 use crate::protocol::{self, Body};
 use crate::state::AppState;
+
+const DEV_ORIGINS: &[&str] = &["http://localhost:1420", "http://127.0.0.1:1420"];
 
 fn header(k: &str, v: &str) -> Header {
     Header::from_bytes(k.as_bytes(), v.as_bytes()).expect("valid header")
@@ -21,8 +25,23 @@ pub fn serve(state: Arc<AppState>, port: u16) -> Result<(), String> {
     for mut req in server.incoming_requests() {
         let state = state.clone();
         std::thread::spawn(move || {
+            // Browsers send Origin on cross-origin requests; anything that isn't
+            // the dev UI is refused. Media elements send none, which is fine.
+            let origin = req
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Origin"))
+                .map(|h| h.value.as_str().to_string());
+            let allowed = match &origin {
+                None => true,
+                Some(o) => DEV_ORIGINS.contains(&o.as_str()),
+            };
+            if !allowed {
+                let _ = req.respond(Response::empty(403));
+                return;
+            }
             let cors = [
-                header("Access-Control-Allow-Origin", "*"),
+                header("Access-Control-Allow-Origin", origin.as_deref().unwrap_or(DEV_ORIGINS[0])),
                 header("Access-Control-Allow-Headers", "*"),
                 header("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
             ];
@@ -78,6 +97,7 @@ pub fn serve(state: Arc<AppState>, port: u16) -> Result<(), String> {
                     }
                     Body::File { path, start, len } => match File::open(&path) {
                         Ok(mut f) => {
+                            let _drive = DRIVE.acquire(Prio::Interactive);
                             let _ = f.seek(SeekFrom::Start(start));
                             req.respond(Response::new(status, headers, f.take(len), Some(len as usize), None))
                         }

@@ -15,7 +15,7 @@
   } from "@mdi/js";
   import Icon from "./Icon.svelte";
   import { navigate } from "../lib/state.svelte";
-  import { call, isTauri, openUrl, type ItemDetails } from "../lib/api";
+  import { call, isTauri, isMac, openUrl, type ItemDetails } from "../lib/api";
   import { fmtBytes, fmtDuration, fmtLongDate, fmtTime } from "../lib/format";
 
   let {
@@ -119,7 +119,7 @@
           <div class="s path" title={d.path}>{d.path}</div>
           <div class="actions">
             {#if isTauri}
-              <button class="link" onclick={() => call("reveal", { id: d.id })}>Show in Finder</button>
+              <button class="link" onclick={() => call("reveal", { id: d.id })}>Show in {isMac ? "Finder" : "File Explorer"}</button>
             {/if}
             <button class="link" onclick={() => navigator.clipboard?.writeText(d.path)}>
               <Icon path={mdiContentCopy} size={14} /> Copy path

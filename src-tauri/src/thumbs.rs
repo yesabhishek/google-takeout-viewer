@@ -1,14 +1,17 @@
 //! Thumbnail cache. Visible tiles are served first (LIFO, so the latest
 //! scroll position wins); the whole library is pre-generated in the
-//! background when the queue is idle. Files are keyed by content fingerprint.
+//! background when the queue is idle and no scan is running. Files are keyed
+//! by content fingerprint. Originals are only ever read, through `DRIVE`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use crate::db::Db;
+use crate::diskio::{self, Prio, DRIVE};
 
 pub const THUMB_PX: u32 = 512;
 const THUMB_Q: f64 = 0.8;
@@ -37,6 +40,7 @@ struct Inner {
     q: Mutex<Queue>,
     cv: Condvar,
     paused: AtomicBool,
+    scanning: AtomicBool,
     bg_total: AtomicUsize,
     bg_done: AtomicUsize,
     failed: Mutex<HashSet<i64>>,
@@ -101,6 +105,7 @@ impl ThumbService {
             q: Mutex::new(Queue::default()),
             cv: Condvar::new(),
             paused: AtomicBool::new(false),
+            scanning: AtomicBool::new(false),
             bg_total: AtomicUsize::new(0),
             bg_done: AtomicUsize::new(0),
             failed: Mutex::new(HashSet::new()),
@@ -178,10 +183,39 @@ impl ThumbService {
         self.inner.cv.notify_all();
     }
 
+    /// Hold background generation while a scan reads the drive.
+    pub fn set_scanning(&self, scanning: bool) {
+        self.inner.scanning.store(scanning, Ordering::Relaxed);
+        self.inner.cv.notify_all();
+    }
+
     pub fn progress(&self) -> (usize, usize, bool) {
         let total = self.inner.bg_total.load(Ordering::Relaxed);
         let done = self.inner.bg_done.load(Ordering::Relaxed).min(total);
         (done, total, self.inner.paused.load(Ordering::Relaxed))
+    }
+
+    /// Delete cached thumbnails. Only files shaped like our cache
+    /// (`ab/abcdef….jpg` and their temporaries) are removed, so a wrongly
+    /// configured data folder can't lose anything else.
+    pub fn clear_cache(&self) {
+        let Ok(buckets) = std::fs::read_dir(&self.inner.dir) else { return };
+        for b in buckets.flatten() {
+            let name = b.file_name().to_string_lossy().to_string();
+            let bucket = name.len() == 2 && name.bytes().all(|c| c.is_ascii_hexdigit());
+            if !bucket || !b.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(b.path()) else { continue };
+            for f in files.flatten() {
+                let n = f.file_name().to_string_lossy().to_string();
+                let ours = n.starts_with(&name) && (n.ends_with(".jpg") || n.contains(".tmp"));
+                if ours && f.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                    let _ = std::fs::remove_file(f.path());
+                }
+            }
+            let _ = std::fs::remove_dir(b.path()); // only succeeds when empty
+        }
     }
 
     pub fn clear_failures(&self) {
@@ -205,7 +239,7 @@ fn worker(inner: Arc<Inner>) {
                     }
                     break (id, false);
                 }
-                if !inner.paused.load(Ordering::Relaxed) {
+                if !inner.paused.load(Ordering::Relaxed) && !inner.scanning.load(Ordering::Relaxed) {
                     if let Some(id) = q.bg.pop_front() {
                         if q.inflight.contains(&id) || q.waiters.contains_key(&id) {
                             inner.bg_done.fetch_add(1, Ordering::Relaxed);
@@ -218,7 +252,7 @@ fn worker(inner: Arc<Inner>) {
             }
         };
         inner.q.lock().unwrap().inflight.insert(id);
-        let result = generate(&inner, id);
+        let result = generate(&inner, id, if background { Prio::Background } else { Prio::Interactive });
         let waiters = {
             let mut q = inner.q.lock().unwrap();
             q.inflight.remove(&id);
@@ -233,7 +267,7 @@ fn worker(inner: Arc<Inner>) {
     }
 }
 
-fn generate(inner: &Inner, id: i64) -> ThumbResult {
+fn generate(inner: &Inner, id: i64, prio: Prio) -> ThumbResult {
     let Some(item) = lookup(&inner.db, id) else {
         return ThumbResult::Failed;
     };
@@ -246,10 +280,13 @@ fn generate(inner: &Inner, id: i64) -> ThumbResult {
     let ratio = w.max(h) / w.min(h);
     let max_px = ((360.0 * ratio).ceil() as u32).clamp(THUMB_PX, 2048);
 
-    let bytes = if item.kind == 0 {
-        image_thumb(&item.path, max_px)
-    } else {
-        video_thumb(&item.path, max_px, inner.ffmpeg.as_deref())
+    let bytes = {
+        let _drive = DRIVE.acquire(prio);
+        if item.kind == 0 {
+            image_thumb(&item.path, max_px)
+        } else {
+            video_thumb(&item.path, max_px, inner.ffmpeg.as_deref())
+        }
     };
     match bytes {
         Some(b) if !b.is_empty() => {
@@ -301,14 +338,14 @@ fn video_thumb(path: &Path, max_px: u32, ffmpeg: Option<&Path>) -> Option<Vec<u8
         let scale = format!(
             "scale=w='if(gt(iw,ih),{max_px},-2)':h='if(gt(iw,ih),-2,{max_px})'"
         );
-        let out = Command::new(ffmpeg)
-            .args(["-v", "error", "-nostdin", "-ss", ss, "-i"])
+        // ffmpeg only reads the original and writes the frame to a pipe.
+        let mut cmd = Command::new(ffmpeg);
+        cmd.args(["-v", "error", "-nostdin", "-ss", ss, "-i"])
             .arg(path)
-            .args(["-frames:v", "1", "-vf", &scale, "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "4", "-"])
-            .output()
-            .ok()?;
-        if out.status.success() && !out.stdout.is_empty() {
-            return Some(out.stdout);
+            .args(["-frames:v", "1", "-vf", &scale, "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "4", "-"]);
+        match diskio::run_captured(cmd, Duration::from_secs(60)) {
+            Some(out) if !out.is_empty() => return Some(out),
+            _ => {}
         }
     }
     None

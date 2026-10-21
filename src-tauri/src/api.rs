@@ -5,9 +5,10 @@ use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::diskio::{self, Mode, Prio, DRIVE};
 use crate::export::{self, ExportOptions};
 use crate::protocol;
 use crate::scan;
@@ -74,9 +75,34 @@ pub fn dispatch(state: &Arc<AppState>, name: &str, args: Value) -> Result<Out, S
             j(json!(true))
         }
         "open_external" => {
-            let p = item_path(state, arg(&args, "id")?)?;
+            let p = open_copy(state, arg(&args, "id")?)?;
             tauri_plugin_opener::open_path(&p, None::<&str>).map_err(|e| e.to_string())?;
             j(json!(true))
+        }
+        "reveal_path" => {
+            let p = PathBuf::from(arg::<String>(&args, "path")?);
+            if !revealable(state, &p)? {
+                return Err("not a library or export folder".into());
+            }
+            tauri_plugin_opener::reveal_item_in_dir(&p).map_err(|e| e.to_string())?;
+            j(json!(true))
+        }
+        "open_link" => {
+            let url: String = arg(&args, "url")?;
+            if !LINKS.iter().any(|l| url == *l || url.starts_with(&format!("{l}/"))) {
+                return Err("link not allowed".into());
+            }
+            tauri_plugin_opener::open_url(&url, None::<&str>).map_err(|e| e.to_string())?;
+            j(json!(true))
+        }
+        "set_drive_mode" => {
+            let mode: String = arg(&args, "mode")?;
+            if mode != "auto" && Mode::parse(&mode).is_none() {
+                return Err(format!("unknown drive mode {mode}"));
+            }
+            state.db.set_setting("drive_mode", &mode)?;
+            state.apply_drive_mode();
+            j(state.drive_info())
         }
         "thumbs_pause" => {
             let paused: bool = arg(&args, "paused")?;
@@ -90,12 +116,7 @@ pub fn dispatch(state: &Arc<AppState>, name: &str, args: Value) -> Result<Out, S
         }
         "cache_info" => j(cache_info(state)),
         "clear_cache" => {
-            let dir = state.thumbs.dir().to_path_buf();
-            if let Ok(entries) = std::fs::read_dir(&dir) {
-                for e in entries.flatten() {
-                    let _ = std::fs::remove_dir_all(e.path());
-                }
-            }
+            state.thumbs.clear_cache();
             state.thumbs.clear_failures();
             state.queue_all_thumbs();
             j(json!(true))
@@ -150,7 +171,64 @@ fn status(state: &AppState) -> Result<Value, String> {
         "platform": std::env::consts::OS,
         "dataDir": state.data_dir.to_string_lossy(),
         "ffmpeg": state.thumbs.has_ffmpeg(),
+        "drive": state.drive_info(),
+        "version": env!("CARGO_PKG_VERSION"),
     }))
+}
+
+/// Pages the About section may open in the browser.
+const LINKS: &[&str] = &[
+    "https://abhishekchoudhury.com",
+    "https://github.com/yesabhishek/google-takeout-viewer",
+    "https://maps.apple.com",
+];
+
+/// "Show in Finder" for paths the UI shows: library folders and the last
+/// export destination.
+fn revealable(state: &AppState, p: &Path) -> Result<bool, String> {
+    let sources: Vec<String> = state.db.read(|c| {
+        let mut st = c.prepare("SELECT path FROM sources")?;
+        let rows = st.query_map([], |r| r.get(0))?;
+        rows.collect()
+    })?;
+    let export_dest = state.export.lock().unwrap().dest.clone();
+    Ok(sources.iter().any(|s| Path::new(s) == p) || (!export_dest.is_empty() && Path::new(&export_dest) == p))
+}
+
+/// Copy an original into our own folder, read-only, for opening in another
+/// app. Editors like Preview save changes in place; this way they can only
+/// ever change the copy.
+pub(crate) fn open_copy(state: &AppState, id: i64) -> Result<PathBuf, String> {
+    let (path, name): (String, String) = state
+        .db
+        .read(|c| c.query_row("SELECT path, name FROM items WHERE id=?1", [id], |r| Ok((r.get(0)?, r.get(1)?))))?;
+    let src = PathBuf::from(path);
+    let size = std::fs::metadata(&src)
+        .map_err(|_| "The drive with this file isn't connected.".to_string())?
+        .len();
+    let dir = state.open_copies_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let out = dir.join(format!("{id}-{name}"));
+    if std::fs::metadata(&out).map(|m| m.len() == size).unwrap_or(false) {
+        return Ok(out);
+    }
+    let tmp = dir.join(format!(".{id}.partial"));
+    let _ = std::fs::remove_file(&tmp);
+    std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+    let copied = {
+        let _drive = DRIVE.acquire(Prio::Interactive);
+        export::copy_verified(&src, 0, &tmp)
+    };
+    if let Err(e) = copied {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("Couldn't read {name}: {e}"));
+    }
+    let mut perm = std::fs::metadata(&tmp).map_err(|e| e.to_string())?.permissions();
+    perm.set_readonly(true);
+    std::fs::set_permissions(&tmp, perm).map_err(|e| e.to_string())?;
+    state.clean_open_copy(&out);
+    std::fs::rename(&tmp, &out).map_err(|e| e.to_string())?;
+    Ok(out)
 }
 
 pub fn add_source(state: &Arc<AppState>, path: &str) -> Result<(), String> {
@@ -159,6 +237,9 @@ pub fn add_source(state: &Arc<AppState>, path: &str) -> Result<(), String> {
         return Err(format!("{path} is not a folder"));
     }
     let p = p.canonicalize().unwrap_or(p);
+    if diskio::inside(&state.data_dir, &p) || diskio::inside(&p, &state.data_dir) {
+        return Err("That folder contains Takeout Viewer's own data. Choose the folder with your Takeout export instead.".into());
+    }
     let ps = p.to_string_lossy().to_string();
     // Refuse nested sources: they would index the same files twice.
     let existing: Vec<String> = state.db.read(|c| {
@@ -192,6 +273,7 @@ pub fn add_source(state: &Arc<AppState>, path: &str) -> Result<(), String> {
         tx.execute("UPDATE items SET source_id=?1 WHERE source_id=-1", [sid])?;
         tx.commit()
     })?;
+    state.apply_drive_mode();
     scan::start(state);
     Ok(())
 }
@@ -203,6 +285,7 @@ fn remove_source(state: &Arc<AppState>, id: i64) -> Result<(), String> {
         tx.execute("DELETE FROM sources WHERE id=?1", [id])?;
         tx.commit()
     })?;
+    state.apply_drive_mode();
     scan::relink(state)?;
     state.changed();
     Ok(())

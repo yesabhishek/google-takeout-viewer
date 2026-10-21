@@ -5,11 +5,12 @@ use rayon::prelude::*;
 use rusqlite::params;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
+use crate::diskio::{Prio, DRIVE};
 use crate::meta;
 use crate::state::AppState;
 use crate::takeout::{self, AlbumMeta, DirSidecars, JsonKind, Sidecar};
@@ -26,6 +27,7 @@ struct Entry {
 }
 
 struct JsonEntry {
+    source_id: i64,
     dir_key: String,
     name: String,
     path: PathBuf,
@@ -45,11 +47,14 @@ pub fn start(state: &Arc<AppState>) -> bool {
         *s = crate::state::ScanStatus { running: true, phase: "walk".into(), ..Default::default() };
     }
     state.scan_cancel.store(false, Ordering::SeqCst);
+    // The scan has the drive to itself; thumbnails for visible photos still work.
+    state.thumbs.set_scanning(true);
     let st = state.clone();
     std::thread::Builder::new()
         .name("scan".into())
         .spawn(move || {
             let res = run(&st);
+            st.thumbs.set_scanning(false);
             st.update_scan(|s| {
                 s.running = false;
                 s.phase = "done".into();
@@ -68,16 +73,31 @@ pub fn start(state: &Arc<AppState>) -> bool {
 /// Run a scan on the current thread (CLI).
 pub fn run_blocking(state: &Arc<AppState>) -> Result<(), String> {
     state.update_scan(|s| *s = crate::state::ScanStatus { running: true, ..Default::default() });
+    state.thumbs.set_scanning(true);
     let r = run(state);
+    state.thumbs.set_scanning(false);
     state.update_scan(|s| s.running = false);
     r
 }
 
 fn cancelled(state: &AppState) -> Result<(), String> {
     if state.scan_cancel.load(Ordering::SeqCst) {
-        Err("Scan cancelled".into())
+        Err("Scan cancelled. Nothing was removed from your library.".into())
     } else {
         Ok(())
+    }
+}
+
+const DISCONNECTED: &str =
+    "The drive was disconnected during the scan. Nothing was removed from your library; reconnect it and press Rescan.";
+
+/// Stop if a library folder vanished mid-scan (drive unplugged or asleep and
+/// unmounted): finishing would make every file on it look deleted.
+fn still_online(roots: &HashMap<i64, PathBuf>) -> Result<(), String> {
+    if roots.values().all(|r| r.is_dir()) {
+        Ok(())
+    } else {
+        Err(DISCONNECTED.into())
     }
 }
 
@@ -89,18 +109,24 @@ fn run(state: &Arc<AppState>) -> Result<(), String> {
         rows.collect()
     })?;
 
-    // 1. Walk
+    // 1. Walk (one thread, so the drive reads directories in order)
     let mut media: Vec<Entry> = Vec::new();
     let mut jsons: Vec<JsonEntry> = Vec::new();
-    let mut online: HashSet<i64> = HashSet::new();
+    let mut roots: HashMap<i64, PathBuf> = HashMap::new();
+    // Sources with folders that could not be listed: their missing files are
+    // not treated as deleted.
+    let mut incomplete: HashSet<i64> = HashSet::new();
     for (sid, root) in &sources {
         let root = PathBuf::from(root);
         if !root.is_dir() {
             continue;
         }
-        online.insert(*sid);
-        walk(state, *sid, &root, &mut media, &mut jsons)?;
+        if walk(state, *sid, &root, &mut media, &mut jsons)? > 0 {
+            incomplete.insert(*sid);
+        }
+        roots.insert(*sid, root);
     }
+    still_online(&roots)?;
     state.update_scan(|s| {
         s.phase = "sidecars".into();
         s.found = media.len();
@@ -109,26 +135,49 @@ fn run(state: &Arc<AppState>) -> Result<(), String> {
         s.message = format!("Reading {} metadata files", jsons.len());
     });
 
-    // 2. Sidecars
-    let parsed: Vec<(usize, JsonKind)> = jsons
+    // 2. Sidecars. A sidecar that exists but can't be read marks its folder, so
+    //    dates and people already in the index are kept rather than wiped.
+    let read_count = AtomicUsize::new(0);
+    let gone = AtomicBool::new(false);
+    let parsed: Vec<(usize, Option<JsonKind>)> = jsons
         .par_iter()
         .enumerate()
         .map(|(i, j)| {
-            let kind = match std::fs::metadata(&j.path) {
-                Ok(m) if m.len() < 4 * 1024 * 1024 => std::fs::read(&j.path)
-                    .map(|b| takeout::parse_json(&b))
-                    .unwrap_or(JsonKind::Other),
-                _ => JsonKind::Other,
+            if state.scan_cancel.load(Ordering::Relaxed) || gone.load(Ordering::Relaxed) {
+                return (i, None);
+            }
+            let kind = {
+                let _drive = DRIVE.acquire(Prio::Background);
+                match std::fs::metadata(&j.path) {
+                    Ok(m) if m.len() >= 4 * 1024 * 1024 => Some(JsonKind::Other),
+                    Ok(_) => std::fs::read(&j.path).ok().map(|b| takeout::parse_json(&b)),
+                    Err(_) => None,
+                }
             };
+            if kind.is_none() && !roots[&j.source_id].is_dir() {
+                gone.store(true, Ordering::Relaxed);
+                return (i, None);
+            }
+            DRIVE.report(kind.is_some());
+            let n = read_count.fetch_add(1, Ordering::Relaxed) + 1;
+            if n % 500 == 0 {
+                state.update_scan(|s| s.done = n);
+            }
             (i, kind)
         })
         .collect();
     cancelled(state)?;
+    still_online(&roots)?;
     let mut sidecars: Vec<(Sidecar, usize)> = Vec::new();
     let mut dirs: HashMap<String, DirSidecars> = HashMap::new();
     let mut album_meta: HashMap<String, AlbumMeta> = HashMap::new();
+    let mut unreadable_dirs: HashSet<String> = HashSet::new();
     for (ji, kind) in parsed {
         let j = &jsons[ji];
+        let Some(kind) = kind else {
+            unreadable_dirs.insert(j.dir_key.clone());
+            continue;
+        };
         match kind {
             JsonKind::Sidecar(sc) => {
                 let idx = sidecars.len();
@@ -154,6 +203,14 @@ fn run(state: &Arc<AppState>) -> Result<(), String> {
         let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))))?;
         rows.collect()
     })?;
+    // A library folder that suddenly looks empty is a mount problem, not a
+    // deleted library: keep its entries.
+    for sid in roots.keys() {
+        let had = existing.values().any(|v| v.3 == *sid);
+        if had && !media.iter().any(|e| e.source_id == *sid) {
+            incomplete.insert(*sid);
+        }
+    }
     let mut todo: Vec<usize> = Vec::new();
     let mut unchanged: Vec<usize> = Vec::new();
     for (i, e) in media.iter().enumerate() {
@@ -175,22 +232,43 @@ fn run(state: &Arc<AppState>) -> Result<(), String> {
     });
     let mut last_link = Instant::now();
     let mut done = 0usize;
-    for chunk in todo.chunks(256) {
+    let mut unreadable = 0usize;
+    for chunk in todo.chunks(64) {
         cancelled(state)?;
-        let metas: Vec<meta::FileMeta> = chunk
+        let metas: Vec<Option<meta::FileMeta>> = chunk
             .par_iter()
             .map(|&i| {
+                if state.scan_cancel.load(Ordering::Relaxed) {
+                    return None;
+                }
                 let e = &media[i];
-                meta::extract(&e.path, e.kind, &e.ext, e.size)
+                if gone.load(Ordering::Relaxed) {
+                    return None;
+                }
+                let m = {
+                    let _drive = DRIVE.acquire(Prio::Background);
+                    meta::extract(&e.path, e.kind, &e.ext, e.size)
+                };
+                // An unplugged drive is not a read error; the check below stops the scan.
+                if m.is_none() && !roots[&e.source_id].is_dir() {
+                    gone.store(true, Ordering::Relaxed);
+                    return None;
+                }
+                DRIVE.report(m.is_some());
+                m
             })
             .collect();
+        cancelled(state)?;
+        still_online(&roots)?;
+        // Files that could not be read stay as they were and are retried next scan.
+        unreadable += metas.iter().filter(|m| m.is_none()).count();
         state.db.write(|c| {
             let tx = c.transaction()?;
             {
                 let mut st = tx.prepare_cached(UPSERT)?;
                 for (k, &i) in chunk.iter().enumerate() {
                     let e = &media[i];
-                    let m = &metas[k];
+                    let Some(m) = &metas[k] else { continue };
                     let sc = matched[i].map(|s| &sidecars[s].0);
                     let sc_path = matched[i].map(|s| jsons[sidecars[s].1].path.to_string_lossy().to_string());
                     let geo = sc.and_then(|s| s.geo).or(match (m.lat, m.lon) {
@@ -237,7 +315,10 @@ fn run(state: &Arc<AppState>) -> Result<(), String> {
             tx.commit()
         })?;
         done += chunk.len();
-        state.update_scan(|s| s.done = done);
+        state.update_scan(|s| {
+            s.done = done;
+            s.skipped = unreadable;
+        });
         // Show progress in the grid while a big import runs.
         if last_link.elapsed().as_secs() >= 8 && done < todo.len() {
             relink(state)?;
@@ -252,6 +333,7 @@ fn run(state: &Arc<AppState>) -> Result<(), String> {
         s.phase = "linking".into();
         s.message = "Grouping duplicates, Live Photos and albums".into();
     });
+    still_online(&roots)?;
     let seen: HashSet<String> = media.iter().map(|e| e.path.to_string_lossy().to_string()).collect();
     state.db.write(|c| {
         let tx = c.transaction()?;
@@ -265,6 +347,9 @@ fn run(state: &Arc<AppState>) -> Result<(), String> {
             )?;
             for &i in &unchanged {
                 let e = &media[i];
+                if unreadable_dirs.contains(&e.dir_key) {
+                    continue;
+                }
                 let sc = matched[i].map(|s| &sidecars[s].0);
                 let people = sc
                     .filter(|s| !s.people.is_empty())
@@ -284,9 +369,11 @@ fn run(state: &Arc<AppState>) -> Result<(), String> {
                     e.dir_key,
                 ])?;
             }
+            // Forget files that are gone, but only for folders that were read
+            // completely. This only touches the index, never the files.
             let mut del = tx.prepare_cached("DELETE FROM items WHERE id=?1")?;
             for (path, (id, _, _, sid)) in &existing {
-                if online.contains(sid) && !seen.contains(path) {
+                if roots.contains_key(sid) && !incomplete.contains(sid) && !seen.contains(path) {
                     del.execute([id])?;
                 }
             }
@@ -313,7 +400,7 @@ fn run(state: &Arc<AppState>) -> Result<(), String> {
                 }
             }
             let ts = now();
-            for sid in &online {
+            for sid in roots.keys() {
                 tx.execute("UPDATE sources SET last_scan=?1 WHERE id=?2", params![ts, sid])?;
             }
         }
@@ -321,14 +408,32 @@ fn run(state: &Arc<AppState>) -> Result<(), String> {
     })?;
 
     relink(state)?;
+    let mut problems: Vec<String> = Vec::new();
+    if unreadable > 0 {
+        problems.push(format!("{unreadable} files couldn't be read and will be retried next scan"));
+    }
+    if !incomplete.is_empty() || !unreadable_dirs.is_empty() {
+        problems.push("some folders couldn't be read, so their existing entries were kept".into());
+    }
     state.update_scan(|s| {
-        s.message = format!(
-            "Indexed {} files in {:.0}s",
-            media.len(),
-            started.elapsed().as_secs_f64()
-        );
+        s.message = format!("Indexed {} files in {}", media.len(), fmt_secs(started.elapsed().as_secs()));
+        s.skipped = unreadable;
+        s.warning = (!problems.is_empty()).then(|| {
+            let mut w = problems.join("; ");
+            w[..1].make_ascii_uppercase();
+            w + ". Check the drive's connection if this keeps happening."
+        });
     });
     Ok(())
+}
+
+fn fmt_secs(s: u64) -> String {
+    match s {
+        0 => "under a second".into(),
+        1..60 => format!("{s}s"),
+        60..3600 => format!("{}m {}s", s / 60, s % 60),
+        _ => format!("{}h {}m", s / 3600, s % 3600 / 60),
+    }
 }
 
 const UPSERT: &str = "INSERT INTO items (source_id, path, dir_key, name, kind, size, mtime, fp, width, height,
@@ -344,13 +449,15 @@ const UPSERT: &str = "INSERT INTO items (source_id, path, dir_key, name, kind, s
     sc_archived=excluded.sc_archived, sc_trashed=excluded.sc_trashed, motion=excluded.motion,
     motion_offset=NULL, sidecar=excluded.sidecar";
 
+/// List one library folder. Returns how many entries could not be read.
 fn walk(
     state: &AppState,
     source_id: i64,
     root: &Path,
     media: &mut Vec<Entry>,
     jsons: &mut Vec<JsonEntry>,
-) -> Result<(), String> {
+) -> Result<usize, String> {
+    let mut errors = 0usize;
     let mut last_dir: Option<(PathBuf, String)> = None;
     let mut last_report = Instant::now();
     let it = WalkDir::new(root).follow_links(false).into_iter().filter_entry(|e| {
@@ -371,7 +478,13 @@ fn walk(
         !(parent_is_takeout && !takeout::is_photos_folder(&name) && !takeout::is_takeout_folder(&name))
     });
     for entry in it {
-        let Ok(entry) = entry else { continue };
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => {
+                errors += 1;
+                continue;
+            }
+        };
         if !entry.file_type().is_file() {
             continue;
         }
@@ -395,10 +508,13 @@ fn walk(
             }
         };
         if is_json {
-            jsons.push(JsonEntry { dir_key, name, path: entry.path().to_path_buf() });
+            jsons.push(JsonEntry { source_id, dir_key, name, path: entry.path().to_path_buf() });
             continue;
         }
-        let Ok(md) = entry.metadata() else { continue };
+        let Ok(md) = entry.metadata() else {
+            errors += 1;
+            continue;
+        };
         if md.len() == 0 {
             continue;
         }
@@ -428,7 +544,7 @@ fn walk(
             last_report = Instant::now();
         }
     }
-    Ok(())
+    Ok(errors)
 }
 
 // ---------------------------------------------------------------------------

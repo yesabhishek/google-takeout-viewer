@@ -108,9 +108,9 @@
       <button class="icon-btn" title="Menu" onclick={() => (app.sidebar = !app.sidebar)}>
         <Icon path={mdiMenu} />
       </button>
-      <button class="brand" onclick={() => navigate({ kind: "photos" })}>
-        <Logo size={30} />
-        <span><b>Takeout</b> Viewer</span>
+      <button class="brand" title="Takeout Viewer" onclick={() => navigate({ kind: "photos" })}>
+        <Logo size={28} />
+        <span class="name"><b>Takeout</b> Viewer</span>
       </button>
     </div>
 
@@ -221,33 +221,46 @@
     flex: 1;
     align-self: stretch;
   }
+  /* Sized by its content (never squeezed under the search field), and at
+     least as wide as the sidebar so the search lines up with the grid. */
   .left {
     display: flex;
     align-items: center;
     gap: 4px;
-    width: calc(var(--sidebar-w) - 24px);
+    min-width: calc(var(--sidebar-w) - 24px);
     flex: none;
     align-self: stretch;
+    padding-right: 12px;
   }
   .inset .left {
-    width: calc(var(--sidebar-w) - 92px);
+    min-width: calc(var(--sidebar-w) - 92px);
   }
   .brand {
     display: flex;
     align-items: center;
     gap: 10px;
-    font-size: 20px;
+    font-size: 18px;
+    letter-spacing: -0.01em;
     color: var(--text-2);
-    padding: 4px 8px;
-    border-radius: 8px;
+    padding: 4px 8px 4px 6px;
+    border-radius: 10px;
     white-space: nowrap;
+  }
+  .brand:hover {
+    background: color-mix(in srgb, var(--text) 6%, transparent);
   }
   .brand b {
     font-weight: 600;
     color: var(--text);
   }
+  @media (max-width: 980px) {
+    .brand .name {
+      display: none;
+    }
+  }
   .search {
     flex: 1;
+    min-width: 160px;
     max-width: 720px;
     height: 48px;
     border-radius: 24px;

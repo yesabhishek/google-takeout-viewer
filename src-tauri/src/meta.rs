@@ -34,13 +34,16 @@ pub fn fingerprint(head: &[u8], size: u64) -> i64 {
     (xxh3_64(head) ^ size.wrapping_mul(0x9E37_79B9_7F4A_7C15)) as i64
 }
 
-pub fn extract(path: &Path, kind: i64, ext: &str, size: u64) -> FileMeta {
+/// Read what the index needs from one file. `None` means the file could not be
+/// read at all (drive unplugged, I/O error); it is then left for the next scan
+/// rather than indexed with made-up values.
+pub fn extract(path: &Path, kind: i64, ext: &str, size: u64) -> Option<FileMeta> {
     let mut m = FileMeta::default();
-    let mut f = match File::open(path) {
-        Ok(f) => f,
-        Err(_) => return m,
-    };
-    let head = read_head(&mut f).unwrap_or_default();
+    let mut f = File::open(path).ok()?;
+    let head = read_head(&mut f).ok()?;
+    if head.is_empty() && size > 0 {
+        return None;
+    }
     m.fp = fingerprint(&head, size);
     if kind == 1 {
         if let Some(v) = video::probe(path) {
@@ -49,7 +52,7 @@ pub fn extract(path: &Path, kind: i64, ext: &str, size: u64) -> FileMeta {
             m.duration_ms = Some(v.duration_ms);
             m.meta_ts = v.creation_ts;
         }
-        return m;
+        return Some(m);
     }
 
     // Size from the header bytes (fast path), falling back to the platform decoder.
@@ -120,7 +123,7 @@ pub fn extract(path: &Path, kind: i64, ext: &str, size: u64) -> FileMeta {
         || lname.starts_with("mvimg_")
         || contains(&head, b"MotionPhoto")
         || contains(&head, b"MicroVideo");
-    m
+    Some(m)
 }
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
@@ -231,27 +234,39 @@ fn exif_ts(f: &exif::Field, off: Option<&exif::Field>) -> Option<i64> {
 }
 
 /// Find the MP4 embedded in a motion photo (Pixel `.MP.jpg`, Samsung, MVIMG).
+/// Streams the file in 1 MB blocks rather than loading it whole.
 pub fn find_motion_offset(path: &Path) -> Option<u64> {
+    const BRANDS: &[&[u8; 4]] = &[b"mp42", b"isom", b"mp41", b"avc1", b"iso2", b"iso4", b"iso5", b"iso6", b"qt  ", b"MSNV"];
+    const BLOCK: usize = 1 << 20;
+    const OVERLAP: usize = 12; // a box header split across two blocks: size + "ftyp" + brand
     let mut f = File::open(path).ok()?;
-    let len = f.metadata().ok()?.len();
-    if len > 200 * 1024 * 1024 {
+    if f.metadata().ok()?.len() > 200 * 1024 * 1024 {
         return None;
     }
-    let mut buf = Vec::with_capacity(len as usize);
-    f.read_to_end(&mut buf).ok()?;
-    const BRANDS: &[&[u8; 4]] = &[b"mp42", b"isom", b"mp41", b"avc1", b"iso2", b"iso4", b"iso5", b"iso6", b"qt  ", b"MSNV"];
-    let mut i = 64usize;
-    while i + 8 <= buf.len() {
-        if &buf[i..i + 4] == b"ftyp" && i >= 4 {
-            let size = u32::from_be_bytes(buf[i - 4..i].try_into().ok()?);
-            let brand = buf.get(i + 4..i + 8)?;
-            if (12..=256).contains(&size) && BRANDS.iter().any(|b| &b[..] == brand) {
-                return Some((i - 4) as u64);
-            }
+    let mut buf: Vec<u8> = Vec::with_capacity(BLOCK + OVERLAP);
+    let mut base = 0u64; // file offset of buf[0]
+    let mut block = vec![0u8; BLOCK];
+    loop {
+        let n = f.read(&mut block).ok()?;
+        if n == 0 {
+            return None;
         }
-        i += 1;
+        buf.extend_from_slice(&block[..n]);
+        let mut i = 4usize;
+        while i + 8 <= buf.len() {
+            let at = base + i as u64 - 4;
+            if &buf[i..i + 4] == b"ftyp" && at >= 60 {
+                let size = u32::from_be_bytes(buf[i - 4..i].try_into().ok()?);
+                if (12..=256).contains(&size) && BRANDS.iter().any(|b| b[..] == buf[i + 4..i + 8]) {
+                    return Some(at);
+                }
+            }
+            i += 1;
+        }
+        let keep = buf.len().min(OVERLAP);
+        base += (buf.len() - keep) as u64;
+        buf.drain(..buf.len() - keep);
     }
-    None
 }
 
 #[cfg(test)]
